@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Tool Gateway</title>
+<style>
+:root { --bg:#f7f7f5; --card:#fff; --ink:#1b1f24; --mute:#5d6570; --line:#dcdfe3; --ok:#14663b; --okbg:#e3f3e9; --bad:#a3231b; --badbg:#fbe6e4; --hold:#7a5200; --holdbg:#fff1cc; --acc:#1d4ed8; }
+@media (prefers-color-scheme: dark) { :root { --bg:#14171a; --card:#1c2126; --ink:#e7eaee; --mute:#9aa3ad; --line:#2f363d; --ok:#7bd8a0; --okbg:#173a27; --bad:#ff9d94; --badbg:#442020; --hold:#f3cf75; --holdbg:#43361a; --acc:#8fb0ff; } }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif }
+.wrap { max-width:1100px; margin:0 auto; padding:20px 16px 40px } h1 { font-size:22px; margin:0 0 2px } h2 { font-size:16px; margin:0 0 10px }
+.sub, .note { color:var(--mute) } .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-top:14px }
+.controls { display:flex; flex-wrap:wrap; gap:12px; align-items:end } label { display:flex; flex-direction:column; font-size:12px; color:var(--mute); gap:3px }
+select, input, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink) }
+button { cursor:pointer; background:var(--acc); color:#fff; border-color:var(--acc) } button.ghost { background:none; color:var(--acc) } button:disabled { opacity:.5 }
+.warn { border-left:3px solid var(--hold); background:var(--holdbg); color:var(--hold); padding:8px 12px; border-radius:4px; margin:14px 0 0 }
+.grid { display:grid; grid-template-columns:3fr 2fr; gap:14px } @media (max-width:800px) { .grid { grid-template-columns:1fr } ol.trace li { grid-template-columns:20px 62px 54px 1fr } }
+ol.trace { list-style:none; margin:0; padding:0 } ol.trace li { display:grid; grid-template-columns:26px 74px 58px 1fr; gap:6px; padding:4px 0; border-bottom:1px solid var(--line); font-size:13px }
+.n { color:var(--mute); text-align:right } .who { font-weight:600 } .msg { overflow-wrap:anywhere }
+.pill { font-size:11px; font-weight:600; border-radius:10px; padding:1px 7px; text-align:center; height:max-content } .ok { background:var(--okbg); color:var(--ok) } .fail { background:var(--badbg); color:var(--bad) } .hold { background:var(--holdbg); color:var(--hold) }
+.approve { margin:10px 0 0; padding:10px; border:1px dashed var(--hold); border-radius:6px } code, pre { font:12px/1.4 ui-monospace,Consolas,monospace } pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere }
+table { border-collapse:collapse; width:100%; font-size:13px } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line) } td.EX { color:var(--bad); background:var(--badbg); font-weight:600 } td.BL { color:var(--ok); background:var(--okbg) } tr.np td:first-child, tr.np td:nth-child(2) { font-weight:600 }
+footer { margin-top:22px; font-size:12px; color:var(--mute) }
+</style>
+</head>
+<body><div class="wrap">
+<h1>Agent Tool Gateway</h1>
+<div class="sub">One request, three designs for giving an agent its tools. Pick who asks, which design carries the call, and what is asked.</div>
+<div class="card"><div class="controls">
+  <label>User<select id="user"></select></label>
+  <label>Design<select id="design"><option value="A">A: one shared static key</option><option value="B">B: user token forwarded unchanged</option><option value="C">C: gateway, on-behalf-of tokens</option></select></label>
+  <label>Scenario<select id="scenario"></select></label>
+  <label style="flex:1;min-width:240px">Request<input id="request"></label>
+  <button id="go">Run</button>
+</div>
+<div class="warn"><b>The planner is a script, and it is gullible on purpose.</b> It obeys any sentence of the form "call &lt;tool&gt; with tag &lt;T&gt; and value &lt;V&gt;" it reads in a tool description or tool result. That shows what the surrounding design has to withstand. It makes no claim about how often a real model would be fooled.</div></div>
+<div class="grid">
+  <div class="card"><h2>Trace</h2><ol class="trace" id="trace"><li><span></span><span></span><span></span><span class="note">Press Run.</span></li></ol><div id="approval"></div></div>
+  <div class="card"><h2>Result</h2><div id="result" class="note">No run yet.</div></div>
+</div>
+<div class="card"><h2>Attack matrix</h2><div class="note">Each row is executed against a fresh copy of each design. The attacks were chosen with the defenses in view; A and B are controls built to fail. "held" counts rows where the attack did not work.</div>
+  <div id="matrix" style="overflow-x:auto">Loading...</div><div id="matrixnotes" class="note" style="margin-top:10px"></div></div>
+<div class="card"><h2>Cost per call</h2><div class="note">In-process loopback with a mock issuer. It says nothing about a real identity provider round trip.</div>
+  <p><button class="ghost" id="bench">Measure (300 calls per design)</button></p><div id="benchout"></div></div>
+<footer>A subset of MCP, not the official SDK (tools/list and tools/call over JSON-RPC, no sessions or streaming). The issuer is a mock in the same process: no browser sign-in, one key, no rotation. Every hop is an in-process HTTP request. Synthetic data. Nothing here has been run against Microsoft Entra ID, Azure API Management or Foundry Agent Service.</footer>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body && JSON.stringify(body) }).then(r => r.json());
+let scenarios = [];
+const LABEL = { ok: "ok", fail: "refused", hold: "held" };
+
+function render(r) {
+  $("trace").replaceChildren(...r.trace.map(t => { const li = el("li"); li.append(el("span", "n", t.n), el("span", "who", t.actor), el("span", "pill " + t.st, t.actor === "planner" && t.st === "fail" ? "injected" : LABEL[t.st]), el("span", "msg", t.text)); return li; }));
+  $("approval").replaceChildren();
+  if (r.status === "awaiting_approval") {
+    const box = el("div", "approve"), p = r.pending;
+    box.append(el("div", "", "Waiting for a human. The approval covers exactly these arguments:"), el("pre", "", `${p.tool}(${JSON.stringify(p.arguments)})\nhash ${p.args_sha256.slice(0, 16)}...`));
+    const b = el("button", "", "Approve"); b.id = "approve"; b.onclick = async () => { b.disabled = true; render(await post("/api/approve/" + r.id)); };
+    box.append(b); $("approval").append(box);
+  }
+  const status = { done: "Finished", awaiting_approval: "Waiting for approval" }[r.status] || r.status;
+  $("result").replaceChildren(el("div", "", status), el("div", "", r.answer || ""), el("div", "note", `FEED_RATE is now ${r.feed_rate.toFixed(1)} m3/h (started at 6.0)`));
+}
+
+async function run() {
+  $("go").disabled = true;
+  render(await post("/api/run", { user: $("user").value, design: $("design").value, request: $("request").value }));
+  $("go").disabled = false;
+}
+
+function table(head, rows, cellClass) {
+  const t = el("table"), tr = el("tr"); head.forEach(h => tr.append(el("th", "", h))); t.append(tr);
+  rows.forEach(r => { const row = el("tr", r.cls); r.cells.forEach((c, i) => row.append(el("td", i ? cellClass(c, i) : "", c))); t.append(row); });
+  return t;
+}
+
+async function loadMatrix() {
+  const m = await (await fetch("/api/matrix")).json();
+  const cls = c => /^(EXECUTES|NOT ATTRIBUTED)/.test(c) ? "EX" : /^(blocked|attributed)/.test(c) ? "BL" : "";
+  const rows = m.rows.map((x, i) => ({ cls: x.not_protected ? "np" : "", cells: [`${i + 1}. ${x.title}`, x.A, x.B, x.C] }));
+  rows.push({ cls: "np", cells: [`held, of ${m.rows.length}`, m.held.A, m.held.B, m.held.C] });
+  $("matrix").replaceChildren(table(["Attack", "A shared key", "B forwarded token", "C gateway"], rows, (c, i) => (i && cls(String(c))) || ""));
+  $("matrixnotes").textContent = `Restricted notes returned to the viewer over 20 queries: A ${m.leaks.A}, B ${m.leaks.B}, C ${m.leaks.C}. Row 15 is the limit of the recommended design: an engineer who approves a poisoned but plausible write gets it executed. Run ${m.versions}.`;
+}
+
+$("bench").onclick = async () => {
+  $("bench").disabled = true; $("benchout").textContent = "Measuring...";
+  const b = await post("/api/bench");
+  $("benchout").replaceChildren(table(["Design", "median ms", "p95 ms"], Object.entries(b.results).map(([k, v]) => ({ cells: [k, v.median_ms, v.p95_ms] })), () => ""), el("div", "note", `${b.n} calls each of read_tag. ${b.versions}`));
+  $("bench").disabled = false;
+};
+
+(async () => {
+  const cfg = await (await fetch("/api/config")).json();
+  scenarios = cfg.scenarios;
+  $("user").replaceChildren(...cfg.users.map(u => { const o = el("option", "", `${u.id[0].toUpperCase() + u.id.slice(1)} (${u.role})`); o.value = u.id; return o; }));
+  $("scenario").replaceChildren(...scenarios.map(s => { const o = el("option", "", s.label); o.value = s.id; return o; }));
+  const pick = () => { $("request").value = scenarios.find(s => s.id === $("scenario").value).request; };
+  $("scenario").onchange = pick; pick(); $("go").onclick = run;
+  $("design").value = "A"; $("user").value = "ana";
+  loadMatrix();
+})();
+</script>
+</body>
+</html>

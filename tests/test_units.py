@@ -82,3 +82,10 @@ async def test_exchange_cache_drops_expired_entries():
     w.gateway.cache = {k: (token, 0) for k, (token, _) in w.gateway.cache.items()}  # every entry is now expired
     await call_tool(w, "search_docs", {"query": "maintenance"}, ben)
     assert [k[1] for k in w.gateway.cache] == ["docs"]
+
+async def test_run_store_is_capped():
+    import app
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://t") as c:
+        for _ in range(103):
+            await c.post("/api/run", json={"user": "ana", "design": "A", "request": "hello"})
+    assert len(app.RUNS) == 100
