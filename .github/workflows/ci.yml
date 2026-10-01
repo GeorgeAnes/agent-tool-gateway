@@ -1,5 +1,7 @@
 name: ci
 on: [push, pull_request]
+permissions:
+  contents: read
 # ubuntu-24.04 rather than ubuntu-latest: that label starts moving to 26.04 on 19 October 2026, which the pinned Playwright 1.56 predates
 jobs:
   test:

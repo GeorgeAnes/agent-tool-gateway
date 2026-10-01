@@ -15,7 +15,7 @@ from toolgate.agent import SCENARIOS, World, advance, approve, start
 from toolgate.auth import USERS
 
 app = FastAPI(title="Agent Tool Gateway")
-RUNS, MATRIX = {}, {}  # ponytail: in-memory runs (the oldest of 100 is dropped) and one cached matrix; fine for a local demo
+RUNS, MATRIX = {}, {}  # in-memory runs (the oldest of 100 is dropped) and one cached matrix; fine for a local demo
 
 class RunReq(BaseModel):
     user: Literal["ana", "ben"]

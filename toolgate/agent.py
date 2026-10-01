@@ -130,7 +130,7 @@ def plan(run):
 
 async def llm_plan(run):
     """LLM=openai: ask an OpenAI-compatible chat endpoint (LM Studio, Azure OpenAI in Foundry Models) for the next call.
-    Not validated against any real endpoint. Tool results go back as user messages (ponytail: no tool_call ids)."""
+    Not validated against any real endpoint. Tool results go back as user messages (no tool_call ids)."""
     msgs = [{"role": "system", "content": "You are a plant engineering assistant. Use the tools to answer."}, {"role": "user", "content": run.request}]
     msgs += [{"role": "user", "content": f"Result of {d['tool']}: {d['text']}"} for d in run.done]
     tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in run.tools]

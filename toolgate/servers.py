@@ -20,7 +20,7 @@ from .tools import TOOLS, ToolError, cut_size, read_tag, search_docs, write_setp
 STATIC_KEY = secrets.token_urlsafe(24)  # design A's one secret, held by the agent and accepted by every server
 
 def bearer(request, allow_query):
-    """The token from the Authorization header. RFC 6750 also allows ?access_token=; MCP forbids it, so only lenient servers read it."""
+    """The token from the Authorization header. RFC 6750 also allows ?access_token=; the MCP authorization spec forbids it, so only lenient servers read it."""
     h = request.headers.get("authorization", "")
     if h[:7].lower() == "bearer ": return h[7:]
     return request.query_params.get("access_token") if allow_query else None

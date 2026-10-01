@@ -27,7 +27,7 @@ class Hold(Exception): """Raised when a risky call needs a human to approve it f
 class Gateway:
     def __init__(self, servers, pins, audit, trace, cache=False):
         self.servers, self.pins, self.audit, self.trace = servers, pins, audit, trace
-        self.pending, self.quarantine = {}, set()  # ponytail: pending approvals and quarantine are never evicted; an engineer's token can add entries without limit
+        self.pending, self.quarantine = {}, set()  # pending approvals and quarantine are never evicted; an engineer's token can add entries without limit
         self.cache = {} if cache else None  # (user token, server, scope) -> (obo token, expiry)
         self.app = FastAPI()
         self.app.get("/.well-known/oauth-protected-resource")(lambda: resource_metadata(AUD["gateway"]))
@@ -66,7 +66,7 @@ class Gateway:
         k = (token, server, tuple(scopes))
         if self.cache is not None and self.cache.get(k, (0, 0))[1] > time.time() + 10: return self.cache[k][0]
         out = obo(token, server, scopes)
-        if self.cache is not None:  # ponytail: expired entries are dropped on insert; live ones (120 s) are not capped
+        if self.cache is not None:  # expired entries are dropped on insert; live ones (120 s) are not capped
             self.cache = {a: b for a, b in self.cache.items() if b[1] > time.time()}
             self.cache[k] = (out, time.time() + 120)
         return out
@@ -97,7 +97,7 @@ class Gateway:
     async def mcp(self, request: Request):
         rid, method, tool, args = await fields(request)
         claims, server = {}, None
-        meta = str(request.base_url) + ".well-known/oauth-protected-resource"  # ponytail: built from the Host header; a deployment would configure the public URL
+        meta = str(request.base_url) + ".well-known/oauth-protected-resource"  # built from the Host header; a deployment would configure the public URL
         try:
             token, claims = self.authenticate(request)
             if method == "tools/list": return reply(rid, {"tools": await self.tools(token)})
