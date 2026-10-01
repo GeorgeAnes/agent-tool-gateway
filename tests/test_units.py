@@ -42,6 +42,7 @@ def test_search_filters_before_ranking():
     q = "bowl imbalance root cause"
     assert {d["id"] for d in search_docs(q, ["public", "engineering"])} >= {"d13", "d16"}
     assert not {d["id"] for d in search_docs(q, ["public"])} & {"d13", "d14", "d15", "d16"}
+    assert len(search_docs(q, ["public"])) == 3  # a full page of public hits: filtering after ranking would leave 1
     assert search_docs("anything", []) == []
 
 async def test_jsonrpc_subset_errors():

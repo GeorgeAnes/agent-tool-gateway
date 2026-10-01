@@ -17,6 +17,7 @@ def url():
     while not server.started: time.sleep(0.05)
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
+
 def test_poisoned_write_executes_on_a_is_refused_on_c_and_ben_needs_approval(url):
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
     with sync_playwright() as p:
