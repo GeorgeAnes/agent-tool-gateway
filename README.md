@@ -6,7 +6,7 @@ In 15 executed attacks, A held 0, B held 9 and C held 14 (a row is held when the
 
 ## Real and Simulated
 
-- The issuer is a mock that runs in the same process. It signs RS256 access tokens, publishes a JWKS and does an authorization-code exchange with PKCE. There is no browser sign-in, no client registration, no key rotation and no OpenID Connect.
+- The issuer is a mock that runs in the same process. It signs RS256 access tokens, builds a JWKS that the verifiers load in-process (no endpoint serves it) and does an authorization-code exchange with PKCE. There is no browser sign-in, no client registration, no key rotation and no OpenID Connect.
 - The protocol is a subset of the Model Context Protocol implemented in this repository, without the official SDK: `tools/list` and `tools/call` over JSON-RPC, with no version negotiation, sessions or streaming. I did not check it against any revision of the specification.
 - Every hop is an in-process HTTP request, so latency says nothing about a real identity provider.
 - The planner is a script, gullible on purpose: it obeys instructions it finds in tool output, so that prompt injection is reproducible. I kept it scripted for that reason. It makes no claim about how often a real model is fooled.
@@ -56,13 +56,13 @@ The browser test needs Chromium (`playwright install chromium`). Without it that
 ## Architecture
 
 ```
-Person ---request---> Agent runtime (planner, MCP client)
-   |                       |
-   |                       | user token (audience: gateway)
-   |                       v
-   |                  +---------+  sign-in, exchange   +--------+
-   +---Approve------->| Gateway |<-------------------->| Issuer |
-      (own token)     +----+----+                      +--------+
+Person ---request---> Agent runtime (planner, MCP client) ---sign-in (PKCE)---+
+   |                       |                                                  |
+   |                       | user token (audience: gateway)                   v
+   |                       v                                              +--------+
+   |                  +---------+              exchange                   | Issuer |
+   +---Approve------->| Gateway |<--------------------------------------->|        |
+      (own token)     +----+----+                                         +--------+
                            | one narrow token per server (audience: that server)
               +------------+------------+
               v            v            v
@@ -99,8 +99,12 @@ toolgate/agent.py      Planner, agent loop and the world for each design
 toolgate/attacks.py    The executed attacks
 app.py, web/           Demo API and page
 bench.py               Cost per call
-tests/                 Unit tests, golden attack matrix, one browser test
+tests/, conftest.py    Unit tests, golden attack matrix, one browser test
 data/docs.json         16 synthetic notes: 12 public (one carries the injected instruction), 4 restricted to the engineering group
+Makefile               demo, test, matrix and bench targets
+requirements.txt       Runtime dependencies, pinned (requirements-dev.txt adds the test tools)
+Dockerfile, docker-compose.yml   The demo in a container
+.github/workflows/ci.yml         Tests and image build
 ```
 
 ## Results
@@ -166,10 +170,6 @@ C costs roughly 1.6 to 2.2 ms more per call than A in these runs, before any rea
 
 My reading: a pure calculator can sit on A, the cheapest design. Data access and writes belong on C. Row 15 is not protected: an engineer who approves a poisoned but plausible write gets it executed, and only the tool-side range and step checks remain.
 
-## More Agency, or Images
-
-More tools and more autonomy raise the odds that some text the model reads steers it, so enforcement stays outside the model: scopes, approvals, tool-side limits. Images add a new channel and leave the rules unchanged: text read from an image (OCR, captions) is untrusted tool output, and the same gateway rules apply. No code for this is included.
-
 ## Using a Model Instead of the Script
 
 `LLM=openai` replaces the scripted planner with an OpenAI-compatible chat endpoint such as LM Studio. It reads `OPENAI_BASE_URL`, `OPENAI_MODEL` and, if the endpoint wants one, `OPENAI_API_KEY`.
@@ -214,6 +214,7 @@ The Azure mapping below is not validated: nothing in it was run, and I did not c
 - I chose the attacks while building the defenses. The matrix shows these checks stopping these attacks; it is no proof that C is secure. A design A deployment with a login on the agent's own front door would stop rows 1 to 4, 6 and 7 there; A as built has none.
 - A compromised gateway or issuer is a total loss. The mock issuer has no client registrations and does not authenticate its callers, which Microsoft Entra ID does for a confidential client. Any code in the process can therefore ask it for a token for another audience such as `api://plant`, or for `gateway.approve`, and go around the gateway and its approval. That the agent does neither is a convention here; a deployment would also keep the servers unreachable except from the gateway. The Approve endpoint mints the approver token itself, so the click is not authenticated, and that token is not bound to one approval. The demo API has no CSRF protection and binds to 127.0.0.1.
 - The schema pin is checked when tools are listed, and a changed tool is refused only after a list has flagged it. A server that changes behavior without changing its schema is not detected. Only name, description and input schema are hashed, and only those are forwarded. The `resource_metadata` URL in a 401 is built from the request's Host header.
+- Not built: image input. Text read from an image (OCR, captions) would be untrusted tool output, like any tool result.
 - The planner is scripted. Retrieval is a 16-note TF-IDF toy used for access control, not RAG, and I make no retrieval-quality claim. Data is synthetic. The physics is a pool only (no scroll, cone or hindered settling).
 - One process, in-memory approvals and exchanged tokens (pending approvals are never evicted), no rate limits. An approval covers the arguments, not the plant state at execution time; the tool-side range and step checks bound the effect. There is no token binding and no revocation, so a stolen valid user token works until it expires (5 minutes here). The audit log is an in-memory list and is not tamper-evident. I cut the k-shortfall measurement (how many fewer hits come back when results are filtered after ranking).
 - Not validated: running the built image and `docker compose up` (CI builds the image and does not start it); the PowerShell commands on Windows (CI runs on Ubuntu); Python versions other than 3.11; `LLM=openai` against a real LM Studio or Azure OpenAI in Foundry Models endpoint; interoperability with the official MCP client; every Azure mapping above.
