@@ -1,2 +1,4 @@
+fastapi==0.142.2
 PyJWT==2.15.1
 cryptography==50.0.1
+httpx==0.28.1
