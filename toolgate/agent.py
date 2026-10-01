@@ -15,6 +15,7 @@ import jwt
 
 from . import note
 from .auth import AUD, SERVER_SCOPES, TOOL_SCOPES, login
+from .gateway import Gateway, schema_hash
 from .servers import STATIC_KEY, make_server
 from .tools import DEFS, TOOLS, fresh_plant
 
@@ -30,12 +31,16 @@ SCENARIOS = [  # id, label, request
 ]
 
 class World:
-    """Three servers, each an ASGI app reached over httpx (real HTTP semantics, no sockets)."""
+    """Three servers, plus a gateway for design C, each an ASGI app reached over httpx (real HTTP semantics, no sockets)."""
     def __init__(self, design, cache=False):
         self.design, self.trace, self.audit, self.plant = design, [], [], fresh_plant()
         self.defs, self.seen = deepcopy(DEFS), []  # seen: credentials the docs server received (for the compromised-server attack)
-        self.aud = AUD["agent"]  # the resource the user's token is issued for
+        self.aud = AUD["gateway"] if design == "C" else AUD["agent"]  # the resource the user's token is issued for
         self.clients = {n: self._client(make_server(n, MODE[design], self.defs, self.plant, self.audit, self.trace), n) for n in SERVER_SCOPES}
+        if design == "C":
+            pins = {t: schema_hash(d) for t, d in self.defs.items()}  # taken while the servers are still as reviewed
+            self.gateway = Gateway(dict(self.clients), pins, self.audit, self.trace, cache)
+            self.clients["gateway"] = self._client(self.gateway.app, "gateway")
 
     def _client(self, app, name):
         async def spy(req):
@@ -53,12 +58,13 @@ async def rpc(client, method, params=None, cred=None, *, query=False, approval=N
 
 async def call_tool(w, tool, args, cred, **kw):
     """One tool call as this design's agent makes it. Design A sends its own key whatever the user presented."""
-    client = w.clients[TOOLS.get(tool, ("plant",))[0]]
+    client = w.clients["gateway" if w.design == "C" else TOOLS.get(tool, ("plant",))[0]]
     return await rpc(client, "tools/call", {"name": tool, "arguments": args}, STATIC_KEY if w.design == "A" else cred, **kw)
 
 async def list_tools(w, cred):
+    names = ["gateway"] if w.design == "C" else list(SERVER_SCOPES)
     out = []
-    for name in SERVER_SCOPES:
+    for name in names:
         st, body, _ = await rpc(w.clients[name], "tools/list", cred=STATIC_KEY if w.design == "A" else cred)
         out += body["result"]["tools"] if st == 200 else []
     return out
@@ -72,6 +78,7 @@ class Run:
     tools: list = field(default_factory=list)
     untrusted: list = field(default_factory=list)  # text from tools that the planner has not read yet
     done: list = field(default_factory=list)
+    pending: dict = None
     status: str = "running"
     answer: str = ""
 
@@ -81,6 +88,14 @@ async def signin(run):
         note(w.trace, "agent", "design A: no user token. The agent holds one shared key and sends it to every server")
         return None
     resource, scopes = AUD["agent"], TOOL_SCOPES
+    if w.design == "C":  # discovery: an unauthenticated request is answered with a pointer to the metadata document
+        mark = len(w.trace)
+        st, _, h = await rpc(w.clients["gateway"], "tools/list")
+        del w.trace[mark:]  # the probe's own trace lines are replaced by the one below; its audit line stays in w.audit
+        note(w.trace, "agent", f"tools/list without a token -> {st}, WWW-Authenticate: {h['www-authenticate']}")
+        meta = (await w.clients["gateway"].get(re.search(r'resource_metadata="([^"]+)"', h["www-authenticate"])[1])).json()
+        note(w.trace, "agent", f"metadata: resource {meta['resource']}, authorization server {meta['authorization_servers'][0]}")
+        resource, scopes = meta["resource"], meta["scopes_supported"]
     token = login(run.user, resource, scopes)
     c = jwt.decode(token, options={"verify_signature": False})  # display only; every service verifies for itself
     note(w.trace, "issuer", f"authorization code + PKCE (S256) accepted; token for {c['sub']}, audience {c['aud']}, scope [{c['scp']}]")
@@ -133,6 +148,10 @@ async def step(run, tool, args, approval=None):
     w = run.w
     note(w.trace, "planner", f"call {tool}({json.dumps(args)})")
     st, body, _ = await call_tool(w, tool, args, run.token, approval=approval)
+    if st == 409 and body.get("error") == "approval_required":
+        run.pending, run.status = body, "awaiting_approval"
+        note(w.trace, "agent", f"{tool} is held until a human approves these exact arguments", "hold")
+        return
     res = body.get("result")  # a JSON-RPC error (unknown tool) has no result
     ok = st == 200 and bool(res) and not res["isError"]
     text = res["content"][0]["text"] if res else f"{st} {body.get('error', '')} {body.get('error_description', '')}".strip()
@@ -149,3 +168,22 @@ async def advance(run):
         run.answer = "; ".join(f"{d['tool']} " + (brief(d["tool"], d["text"]) if d["ok"] else f"failed: {d['text']}") for d in run.done) or "nothing to do"
         run.status = "done"
         note(run.w.trace, "agent", "answer: " + run.answer)
+
+async def approve(run):
+    """The human clicks Approve. The approver token is a separate grant (scope gateway.approve) that the agent never holds."""
+    w, p = run.w, run.pending
+    tok = login(run.user, AUD["gateway"], ["gateway.approve"])
+    note(w.trace, "human", f"{run.user} clicks Approve for {p['tool']}({json.dumps(p['arguments'])}); approver token has scope gateway.approve")
+    r = await w.clients["gateway"].post(f"/approvals/{p['approval_id']}/approve", headers={"Authorization": f"Bearer {tok}"})
+    if r.status_code != 200:
+        note(w.trace, "gateway", f"approval refused: {r.status_code}", "fail")
+    run.status, run.pending = "running", None
+    await step(run, p["tool"], p["arguments"], approval=p["approval_id"])
+    await advance(run)
+
+async def execute(w, user, request, auto=False):
+    run = await start(w, user, request)
+    await advance(run)
+    while auto and run.status == "awaiting_approval":
+        await approve(run)
+    return run

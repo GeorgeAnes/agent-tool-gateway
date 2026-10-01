@@ -5,6 +5,7 @@ import pytest
 
 from toolgate import agent
 from toolgate.agent import BOWL, World, call_tool, rpc
+from toolgate.auth import TOOL_SCOPES, login
 from toolgate.tools import ToolError, cut_size, fresh_plant, search_docs, write_setpoint
 
 pytestmark = pytest.mark.anyio
@@ -62,3 +63,22 @@ async def test_llm_planner_parses_an_openai_style_reply(monkeypatch):
     monkeypatch.setenv("OPENAI_MODEL", "local")
     run = agent.Run(World("A"), "ben", "What is the feed rate?")
     assert await agent.llm_plan(run) == ("call", "read_tag", {"tag": "FEED_RATE"})
+
+@pytest.mark.parametrize("design", "ABC")
+async def test_a_tool_the_planner_invents_is_refused_not_a_crash(design):
+    run = await agent.start(World(design), "ben", "hello")
+    await agent.step(run, "delete_everything", {"tag": "T"})
+    assert run.done[0]["ok"] is False and "unknown" in run.done[0]["text"]
+
+async def test_search_docs_ignores_an_undeclared_k_argument():
+    w = World("C")
+    r = await call_tool(w, "search_docs", {"query": "bowl seals vibration limits maintenance schedule", "k": 10}, login("ben", w.aud, TOOL_SCOPES))
+    assert len(json.loads(r[1]["result"]["content"][0]["text"])["hits"]) == 3
+
+async def test_exchange_cache_drops_expired_entries():
+    w = World("C", cache=True)
+    ben = login("ben", w.aud, TOOL_SCOPES)
+    await call_tool(w, "read_tag", {"tag": "FEED_RATE"}, ben)
+    w.gateway.cache = {k: (token, 0) for k, (token, _) in w.gateway.cache.items()}  # every entry is now expired
+    await call_tool(w, "search_docs", {"query": "maintenance"}, ben)
+    assert [k[1] for k in w.gateway.cache] == ["docs"]
