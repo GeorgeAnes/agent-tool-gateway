@@ -1,3 +1,7 @@
+"""Golden attack matrix, and a test per security check that fails if the check is removed: the gateway given a
+weakened verifier lets the attack token past authentication (409 approval_required instead of 401)."""
+import hashlib
+import hmac
 import json
 import secrets
 import time
@@ -5,15 +9,69 @@ import time
 import jwt
 import pytest
 
-from toolgate import gateway
+from toolgate import gateway, servers
 from toolgate.agent import World, call_tool, rpc
+from toolgate.attacks import PUB_PEM, WRITE, b64, bad_tokens, run_rows, unb64
 from toolgate.auth import _s256, AUD, CODES, ISSUER, KEY, KID, TOOL_SCOPES, AuthError, authorize, exchange_code, jwks, login, mint, obo, verify
 from toolgate.tools import RESTRICTED
 
 pytestmark = pytest.mark.anyio
 
+# attack id -> did it succeed against (A, B, C)? Regenerate with `make matrix` only after deciding the change is intended.
+GOLDEN = {
+    "anonymous": (True, False, False), "forged_signature": (True, False, False), "alg_none": (True, False, False), "hs256": (True, False, False),
+    "wrong_audience": (True, True, False), "wrong_issuer": (True, False, False), "expired": (True, False, False), "query_string": (True, True, False),
+    "viewer_poison": (True, False, False), "replay": (True, True, False), "groups_arg": (True, False, False), "no_approval": (True, True, False),
+    "unattributed": (True, False, False), "rug_pull": (True, True, False), "approved_poison": (True, True, True),
+}
+REASON = {"forged_signature": "InvalidSignatureError", "alg_none": "InvalidAlgorithmError", "hs256": "InvalidAlgorithmError",
+          "wrong_audience": "InvalidAudienceError", "wrong_issuer": "InvalidIssuerError", "expired": "ExpiredSignatureError"}
 GW = AUD["gateway"]
-WRITE = {"tag": "FEED_RATE", "value": 7.5}
+
+async def test_golden_matrix():
+    rows = await run_rows()
+    assert {r["id"]: tuple(r["success"][d] for d in "ABC") for r in rows} == GOLDEN
+    assert [r["C"] for r in rows if r["not_protected"]] == ["EXECUTES (NOT PROTECTED)"]
+
+def naive(token, audience, scope=None):
+    """A verifier that trusts the algorithm named in the token header: the classic bug."""
+    head, body, sig = token.split(".")
+    if unb64(head)["alg"] == "none":
+        return unb64(body)
+    if unb64(head)["alg"] == "HS256":  # the public key used as an HMAC secret
+        assert hmac.compare_digest(b64(hmac.new(PUB_PEM, f"{head}.{body}".encode(), hashlib.sha256).digest()), sig)
+        return unb64(body)
+    return verify(token, audience, scope)
+
+def without(option):
+    """The real decode with exactly one PyJWT check switched off."""
+    def weak(token, audience, scope=None):
+        return jwt.decode(token, KEY.public_key(), algorithms=["RS256"], issuer=ISSUER, audience=audience, options={option: False})
+    return weak
+
+WEAK = {"forged_signature": without("verify_signature"), "alg_none": naive, "hs256": naive, "wrong_audience": without("verify_aud"),
+        "wrong_issuer": without("verify_iss"), "expired": without("verify_exp")}
+
+@pytest.mark.parametrize("name", REASON)
+async def test_each_check_matters(name, monkeypatch):
+    token, _ = bad_tokens(GW)[name]
+    with pytest.raises(AuthError) as e:
+        verify(token, GW)
+    assert (e.value.status, e.value.reason) == (401, REASON[name])
+    w = World("C")
+    assert (await call_tool(w, "write_setpoint", WRITE, token))[0] == 401
+    WEAK[name](token, GW)  # the attack token is well formed: it breaks only the one check
+    monkeypatch.setattr(gateway, "verify", WEAK[name])  # remove that check from the gateway
+    assert (await call_tool(w, "write_setpoint", WRITE, token))[0] == 409  # now only the approval hold stops it
+
+async def test_token_in_query_string_is_ignored(monkeypatch):
+    w, token = World("C"), login("ben", GW, TOOL_SCOPES)
+    assert (await call_tool(w, "write_setpoint", WRITE, token, query=True))[0] == 401
+    approve = lambda: w.clients["gateway"].post("/approvals/x/approve", params={"access_token": login("ben", GW, ["gateway.approve"])})
+    assert (await approve()).status_code == 401
+    monkeypatch.setattr(gateway, "bearer", lambda request, allow_query: servers.bearer(request, True))
+    assert (await call_tool(w, "write_setpoint", WRITE, token, query=True))[0] == 409
+    assert (await approve()).status_code == 403  # now the token is read, and the approval id is unknown
 
 def test_pkce_and_single_use_code():
     v = secrets.token_urlsafe(32)
